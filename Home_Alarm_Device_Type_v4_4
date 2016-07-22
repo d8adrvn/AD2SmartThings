@@ -1,504 +1,485 @@
-/**
- *  AD2SmartThings Home Alarm Device Type
- *  Adds your Honeywell/Ademco home alarm to your SmartThings physical graph
- *  Honeywell/Ademco alarms are usually installed by ADT and other companies.  Check your alarm panel to verify
- *  This SmartThings Device Type Code Works With Arduino Connected To An AD2Pi Wired To A Honeywell/Ademco Home Alarm
+/** 
+ * AD2SmartThings v4_4.1
+ * Couple your Ademco/Honeywell Alarm to your SmartThings Graph using an AD2PI, an Arduino and a ThingShield
+ * The Arduino passes all your alarm messages to your SmartThings Graph where they can be processed by the Device Type
+ * Use the Device Type to control your alarm or use SmartApps to integrate with other events in your home graph
  *
- *	By Stan Dotson (stan@dotson.info) and Michael Ritchie
  *
- *	Credits:
- *  Lots of good ideas from @craig whose code can be found at https://gist.github.com/e5b30109fdaec805d474.git
- *  Also relied on architecture enabled by github contributor vassilisv 
- *  Also thanks to Sean Matthews for contributing technical approach to setting AD2Pi address
- *  Date: 2014-08-14
- *  
- *  Zones
- *  This device type supports up to 36 zones.  All the coding is in place
- *  To adjust the number of zones, simply trim the number of zones listed in the <details> argument list.
- *  No other code needs to be modified! (however you can tidy up your event log by deleting  the additional code that refers to unused zones).
- *  
- *  
- *  
+ ****************************************************************************************************************************
+ * Libraries:
+ * 
+ * An enhanced SmartThings Library was created by  Dan G Ogorchock & Daniel J Ogorchock and their version is required for this implementation.
+ * Their enhanced library can found at:
+ * https://github.com/DanielOgorchock/ST_Anything/tree/master/Arduino/libraries/SmartThings
+ *
+ * SoftwareSerial library was default library provided with Arduino IDE
+ *
+ *
+ ****************************************************************************************************************************
+ *
+ * Pin Configuration for AD2Pi to Arduino Mega
+ * Use standard jumper wires to connect:
+ *  Jumper   AD2PI   Mega
+ *    GND    6       GND
+ *   3.3V    1       3.3V
+ *    RX     10       19
+ *    TX     8        18
+ *
+ * Pin Configuration for Arduino Mega to ThingSheild
+ * Use standard jumper wires to connect:
+ *  Jumper      Mega  ThingShield
+ *    TX        14        2   
+ *    RX        15        3
+ *    
+ *
+ *
+ * Credit: thanks to github contributor vassilisv for the intial idea and to AlarmDecoder.com for suggesting to use
+ * serial out feature of the AD2Pi to connect to the Arduino card.  This project also benefitted imenseley from code 
+ * shared by SmartThings contributor  @craig
+ * 
+ * Thanks to Dan G Ogorchock & Daniel J Ogorchock for the updated SmartThings library.  This library is required for the ThingShield
+ * to use the hardware serial port on the Mega and for general performance enhancements.
  */
- 
- // for the UI
 
-preferences {
-	
-    // The Configuration Command preferences allows input of a configuration command to be sent to AD2Pi.  
-    // For example, to change the address to 31 the command would be "ADDRESS=31"
-    // After entering the command in setup, you MUST press the "Config" tile to send the configuration command to the AD2Pi
-    // Note: this will write to the eeprom of the AD2* so caution should be used to not excessively do this task or it would eventually damage the EEPROM. 
-    // This should be preformed only during system setup and configuration!
-    // To prevent excessive use, the configCommand value can be reset to null after sending to device
-    // pressing the "Config" tile and sending null will harmlessly request the alarm panel to report out its Configurtion into the message tile.
-    
-    input("configCommand", "text", title: "AD2Pi Configuration Command", description: "for example ADDRESS=31", defaultValue: '', required: false, displayDuringSetup: true)
-	input(name: "securityCode", type: "text", title: "Enter your 4 digit homeowner security code", description: "enter 4 digit code", defaultValue:"", required: true, displayDuringSetup: true)
-    input("panicKey","enum", title: "Select Panic Key Configured By Your Installer", description: "(A:1&*) or (B:*&#) or (C:3&#)", options: ["A","B","C"], required: true, displayDuringSetup: true)
+
+#include <SoftwareSerial.h>
+#include <SmartThings.h>  //be sure you are using the library from ST_ANYTHING which has support for hardware serial on the Arduino Mega
+
+/*************************************************** User Settings ***************************************************
+ * This section contains parameters that need to be set during initial setup.*/
+
+// Set the number of zones in your system
+#define numZones      36
+
+// You have the option to set your security code in the Device Handler or here in the sketch.  Your security code must be set.
+// The code in the Device Handler takes priority if set.
+String securityCode = "";
+
+boolean isDebugEnabled=true;  //set to true to debug
+
+/************************************************* End User Settings *************************************************/
+
+#define PIN_LED       13
+#define BUFFER_SIZE   300 // max message length from ADT
+
+SmartThingsCallout_t messageCallout; // call out function forward declaration
+SmartThings smartthing(HW_SERIAL3, messageCallout);  //constructor for hardware serial port with ST_Anything Library
+
+// set global variables
+char buffer[BUFFER_SIZE];  //stores characters in AD2Pi to build up a message
+int bufferIdx;  //counts characters as they come in from AD2Pi
+String previousStr;
+String previousPowerStatus;
+String previousChimeStatus;
+String previousAlarmStatus;
+String previousActiveZone;
+String previousInactiveList;
+String previousSendData;
+
+int lastZone;  //stores the last zone number to fault to compare as faults are cycled by system
+int zoneStatusList[numZones + 1]; //stores each zone's status.  Adding 1 to numZones since element 0 will be a count of faulted zones and elements greater than 0 will equote to specific zone number  
+
+void setup() {
+  // initialize AD2 serial stream
+  Serial1.begin(115200);                
+  bufferIdx = 0;
+
+  //debug stuff
+  if (isDebugEnabled) {
+    Serial.begin(9600);         // setup serial with a baud rate of 9600
+    Serial.println("setup..");  // print out 'setup..' on start
+  }
+  // set SmartThings Shield LED
+  smartthing.shieldSetLED(0, 0, 0); // shield led is off
+  
+  //initialize array counter and zones to 0.  0 = inactive, 1 = active
+  for (int i = 0; i < (numZones + 1); i = i + 1) {
+    zoneStatusList[i] = 0;
+  }
+  lastZone = 0;
 }
 
-
-metadata {
-	definition (name: "AD2SmartThings v4.4", version: "4.4",author: "stan@dotson.info") 
-    	{
-
-	capability "Switch"  // <on> will arm alarm in "stay" mode; same as armStay
-        capability "Lock"  // <lock> will arm alarm in "away" mode; same as armAway
-	capability "Alarm" // enables <both> or <siren> to  immediately alarm the system
-	capability "Motion Sensor" //allows your alarm panel to mimic a motion sensor. The motion sensor will be active when system alarms
-        
-        command "disarm"
-        command "armStay"
-        command "armAway"
-        command "chime"
-        command "config"
-        command "siren"
-        command "pressPanicOnce"
-        command "pressPanicTwice"
-        
-        attribute "system", "string"
-        attribute "msg", "string"
-        attribute "alertMsg", "string"
-
-	}
-}
-
-// Simulator metadata
-simulator {
-}
-
-// UI tile definitions
-tiles {
-
-	standardTile("main", "device.system", width: 2, height: 2, canChangeIcon: true, canChangeBackground: true)
- 	{
-		state "disarmed", label:"Disarmed", action:"disarm", icon:"st.Home.home2", backgroundColor:"#ffffff"
-		state "armedAway", label:"Armed Away", action:"disarm", icon:"st.Home.home3", backgroundColor:"#587498"
-		state "armedStay", label:"Armed Stay", action:"disarm", icon:"st.Home.home4", backgroundColor:"#587498"
-        	state "alarm", label:"Alarm!", action:"disarm", icon:"st.Home.home3", backgroundColor:"#E86850"
-        	state "armingAway", label:"Arming Away", action:"disarm", icon:"st.Home.home3", backgroundColor:"#FFD800"
-		state "armingStay", label:"Arming Stay", action:"disarm", icon:"st.Home.home4", backgroundColor:"#FFD800"
-	}
- 	standardTile("stay", "device.system", width: 1, height: 1, decoration: "flat")
- 	{
-        	state "disarmed", label: "Stay", action: "armStay", icon:"st.Home.home4", nextState: "armingStay"
-        	state "armingStay", label:"Arming Stay", action: "disarm", icon:"st.Home.home4"
-        	state "armedStay", label:"Armed Stay", action: "disarm", icon:"st.Home.home4"
-  	}
-        
-  	standardTile("away", "device.system", width: 1, height: 1, decoration: "flat")
-	{
-       		state "disarmed", label: "Away", action: "armAway", icon:"st.Home.home3", nextState: "armingAway"
-        	state "armingAway", label:"Arming Away", action: "disarm", icon:"st.Home.home3" 
-       		state "armedAway", label:"Armed Away", action: "disarm", icon:"st.Home.home3"   
-  	}
-        
- 	standardTile("disarm", "device.system", width: 1, height: 1, decoration: "flat")
-    	{
-       		state "disarmed", label:'Disarm', action: "disarm", icon:"st.Home.home2"   
- 	}
-    
-    	standardTile("panic", "device.panic", width: 1, height: 1, decoration: "flat")
-    	{
-       		state "disarmed", label: "PANIC", action: "pressPanicOnce", icon:"st.alarm.beep.beep", nextState: "pressedOnce"
-        	state "pressedOnce", label: "Press Twice More", action: "pressPanicTwice", icon:"st.alarm.beep.beep", nextState: "pressedTwice"
-        	state "pressedTwice", label: "Press Once More", action: "siren", icon:"st.alarm.beep.beep"
-        	state "alarm", label:"Panic Alarm", action:"disarm", icon:"st.alarm.beep.beep", backgroundColor:"#E86850" 
-  	}
-    
-    	standardTile("chime", "device.chime", width: 1, height: 1, canChangeIcon: true, canChangeBackground: true, inactiveLabel: false, decoration: "flat")
-    	{
-       		state "chimeOn", label: 'Chime On',   action: "chime", icon: "st.custom.sonos.unmuted", backgroundColor: "#ffffff", nextState: "sendingChime"
-       		state "chimeOff", label: 'Chime Off', action: "chime", icon: "st.custom.sonos.muted", backgroundColor: "#ffffff", nextState: "sendingChime"
-       		state "sendingChime", label: 'Sending', action: "chime",icon: "st.custom.sonos.unmuted", backgroundColor: "#ffffff"
-  	}
-
-	standardTile("configAD2Pi", "device.config", width: 1, height:1, inactiveLabel: false, canChangeIcon: true, canChangeBackground: true,  decoration:"flat")
-	{
-    		state "default", label: 'AD2Pi Config', action: "config", icon: "st.secondary.refresh-icon", backgroundColor: "#ffffff"
-    	}
-        
-   	valueTile("msg", "device.msg", width: 3, height:1, inactiveLabel: false, decoration: "flat") 
-   	{
-		state "default", label:'${currentValue}'
-	}
- 
- 
- // tiles to report activity in a given zone.  Feel free to customize by changing the label in label: 'custom name' 
- 
-   	standardTile("zone1", "device.zone1", width: 1, height:1, inactiveLabel: false, canChangeIcon: true, canChangeBackground: true) 
-    	{
-		state "inactive", label: 'Zone 1', icon: "st.security.alarm.clear", backgroundColor: "#ffffff"
-		state "active", label: 'Zone 1', icon: "st.security.alarm.alarm", backgroundColor: "#ffa81e"
-	}
-    	standardTile("zone2", "device.zone2", width: 1, height:1, inactiveLabel: false, canChangeIcon: true, canChangeBackground: true) 
-    	{
-		state "inactive", label: 'Zone 2', icon: "st.security.alarm.clear", backgroundColor: "#ffffff"
-        	state "active", label: 'Zone 2', icon: "st.security.alarm.alarm", backgroundColor: "#ffa81e"
-   	}
-    	standardTile("zone3", "device.zone3", width: 1, height:1, inactiveLabel: false, canChangeIcon: true, canChangeBackground: true) 
-    	{
-		state "inactive", label: 'Zone 3', icon: "st.security.alarm.clear", backgroundColor: "#ffffff"
-		state "active", label: 'Zone 3', icon: "st.security.alarm.alarm", backgroundColor: "#ffa81e"
-	}
- 	standardTile("zone4", "device.zone4", width: 1, height:1, inactiveLabel: false, canChangeIcon: true, canChangeBackground: true) 
-    	{	
-		state "inactive", label: 'Zone 4', icon: "st.security.alarm.clear", backgroundColor: "#ffffff"
-		state "active", label: 'Zone 4', icon: "st.security.alarm.alarm", backgroundColor: "#ffa81e"
-	}
-   	standardTile("zone5", "device.zone5", width: 1, height:1, inactiveLabel: false, canChangeIcon: true, canChangeBackground: true) 
-    	{
-		state "inactive", label: 'Zone 5', icon: "st.security.alarm.clear", backgroundColor: "#ffffff"
-		state "active", label: 'Zone 5', icon: "st.security.alarm.alarm", backgroundColor: "#53a7c0"
-	}
-  	standardTile("zone6", "device.zone6", width: 1, height:1, inactiveLabel: false, canChangeIcon: true, canChangeBackground: true) 
-    	{
-		state "inactive", label: 'Zone 6', icon: "st.security.alarm.clear", backgroundColor: "#ffffff"
-		state "active", label: 'Zone 6', icon: "st.security.alarm.alarm", backgroundColor: "#53a7c0"
-	}                      
-    standardTile("zone7", "device.zone7", width: 1, height:1, inactiveLabel: false, canChangeIcon: true, canChangeBackground: true) 
-    	{
-		state "inactive", label: 'Zone 7', icon: "st.security.alarm.clear", backgroundColor: "#ffffff"
-		state "active", label: 'Zone 7', icon: "st.security.alarm.alarm", backgroundColor: "#53a7c0"
-	}
-	standardTile("zone8", "device.zone8", width: 1, height:1, inactiveLabel: false, canChangeIcon: true, canChangeBackground: true) 
-    	{
-		state "inactive", label: 'Zone 8', icon: "st.security.alarm.clear", backgroundColor: "#ffffff"
-		state "active", label: 'Zone 8', icon: "st.security.alarm.alarm", backgroundColor: "#53a7c0"
-	}
-	standardTile("zone9", "device.zone9", width: 1, height:1, inactiveLabel: false, canChangeIcon: true, canChangeBackground: true) 
-    	{
-		state "inactive", label: 'Zone 9', icon: "st.security.alarm.clear", backgroundColor: "#ffffff"
-		state "active", label: 'Zone 9', icon: "st.security.alarm.alarm", backgroundColor: "#53a7c0"
-	}
-	standardTile("zone10", "device.zone10", width: 1, height:1, inactiveLabel: false, canChangeIcon: true, canChangeBackground: true) 
-    	{
-		state "inactive", label: 'Zone 10', icon: "st.security.alarm.clear", backgroundColor: "#ffffff"
-		state "active", label: 'Zone 10', icon: "st.security.alarm.alarm", backgroundColor: "#53a7c0"
-	}  
-   	standardTile("zone11", "device.zone11", width: 1, height:1, inactiveLabel: false, canChangeIcon: true, canChangeBackground: true) 
-    	{
-		state "inactive", label: 'Zone 11', icon: "st.security.alarm.clear", backgroundColor: "#ffffff"
-		state "active", label: 'Zone 11', icon: "st.security.alarm.alarm", backgroundColor: "#ffa81e"
-	}
-	standardTile("zone12", "device.zone12", width: 1, height:1, inactiveLabel: false, canChangeIcon: true, canChangeBackground: true) 
-    	{
-		state "inactive", label: 'Zone 12', icon: "st.security.alarm.clear", backgroundColor: "#ffffff"
-        	state "active", label: 'Zone 12', icon: "st.security.alarm.alarm", backgroundColor: "#ffa81e"
-   	}
-	standardTile("zone13", "device.zone13", width: 1, height:1, inactiveLabel: false, canChangeIcon: true, canChangeBackground: true) 
-    	{
-		state "inactive", label: 'Zone 13', icon: "st.security.alarm.clear", backgroundColor: "#ffffff"
-		state "active", label: 'Zone 13', icon: "st.security.alarm.alarm", backgroundColor: "#ffa81e"
-	}
- 	standardTile("zone14", "device.zone14", width: 1, height:1, inactiveLabel: false, canChangeIcon: true, canChangeBackground: true) 
-    	{
-		state "inactive", label: 'Zone 14', icon: "st.security.alarm.clear", backgroundColor: "#ffffff"
-		state "active", label: 'Zone 14', icon: "st.security.alarm.alarm", backgroundColor: "#ffa81e"
-	}
-   	standardTile("zone15", "device.zone15", width: 1, height:1, inactiveLabel: false, canChangeIcon: true, canChangeBackground: true) 
-    	{
-		state "inactive", label: 'Zone 15', icon: "st.security.alarm.clear", backgroundColor: "#ffffff"
-		state "active", label: 'Zone 15', icon: "st.security.alarm.alarm", backgroundColor: "#53a7c0"
-	}
-  	standardTile("zone16", "device.zone16", width: 1, height:1, inactiveLabel: false, canChangeIcon: true, canChangeBackground: true) 
-    	{
-		state "inactive", label: 'Zone 16', icon: "st.security.alarm.clear", backgroundColor: "#ffffff"
-		state "active", label: 'Zone 16', icon: "st.security.alarm.alarm", backgroundColor: "#53a7c0"
-	}                      
-  	standardTile("zone17", "device.zone17", width: 1, height:1, inactiveLabel: false, canChangeIcon: true, canChangeBackground: true) 
-    	{
-		state "inactive", label: 'Zone 17', icon: "st.security.alarm.clear", backgroundColor: "#ffffff"
-		state "active", label: 'Zone 17', icon: "st.security.alarm.alarm", backgroundColor: "#53a7c0"
-	}  
-  	standardTile("zone18", "device.zone18", width: 1, height:1, inactiveLabel: false, canChangeIcon: true, canChangeBackground: true) 
-    	{
-		state "inactive", label: 'Zone 18', icon: "st.security.alarm.clear", backgroundColor: "#ffffff"
-		state "active", label: 'Zone 18', icon: "st.security.alarm.alarm", backgroundColor: "#53a7c0"
-	}  
-  	standardTile("zone19", "device.zone19", width: 1, height:1, inactiveLabel: false, canChangeIcon: true, canChangeBackground: true) 
-    	{
-		state "inactive", label: 'Zone 19', icon: "st.security.alarm.clear", backgroundColor: "#ffffff"
-		state "active", label: 'Zone 19', icon: "st.security.alarm.alarm", backgroundColor: "#53a7c0"
-	}
-    	standardTile("zone20", "device.zone20", width: 1, height:1, inactiveLabel: false, canChangeIcon: true, canChangeBackground: true) 
-    	{
-		state "inactive", label: 'Zone 20', icon: "st.security.alarm.clear", backgroundColor: "#ffffff"
-		state "active", label: 'Zone 20', icon: "st.security.alarm.alarm", backgroundColor: "#53a7c0"
-	}  
-   	standardTile("zone21", "device.zone21", width: 1, height:1, inactiveLabel: false, canChangeIcon: true, canChangeBackground: true) 
-    	{
-		state "inactive", label: 'Zone 21', icon: "st.security.alarm.clear", backgroundColor: "#ffffff"
-		state "active", label: 'Zone 21', icon: "st.security.alarm.alarm", backgroundColor: "#ffa81e"
-	}
-	standardTile("zone22", "device.zone22", width: 1, height:1, inactiveLabel: false, canChangeIcon: true, canChangeBackground: true) 
-    	{
-		state "inactive", label: 'Zone 22', icon: "st.security.alarm.clear", backgroundColor: "#ffffff"
-        	state "active", label: 'Zone 22', icon: "st.security.alarm.alarm", backgroundColor: "#ffa81e"
-   	}
-	standardTile("zone23", "device.23", width: 1, height:1, inactiveLabel: false, canChangeIcon: true, canChangeBackground: true) 
-    	{
-		state "inactive", label: 'Zone 23', icon: "st.security.alarm.clear", backgroundColor: "#ffffff"
-		state "active", label: 'Zone 23', icon: "st.security.alarm.alarm", backgroundColor: "#ffa81e"
-	}
- 	standardTile("zone24", "device.zone24", width: 1, height:1, inactiveLabel: false, canChangeIcon: true, canChangeBackground: true) 
-    	{
-		state "inactive", label: 'Zone 24', icon: "st.security.alarm.clear", backgroundColor: "#ffffff"
-		state "active", label: 'Zone 24', icon: "st.security.alarm.alarm", backgroundColor: "#ffa81e"
-	}
-   	standardTile("zone25", "device.zone25", width: 1, height:1, inactiveLabel: false, canChangeIcon: true, canChangeBackground: true) 
-    	{
-		state "inactive", label: 'Zone 25', icon: "st.security.alarm.clear", backgroundColor: "#ffffff"
-		state "active", label: 'Zone 25', icon: "st.security.alarm.alarm", backgroundColor: "#53a7c0"
-	}
-  	standardTile("zone26", "device.zone26", width: 1, height:1, inactiveLabel: false, canChangeIcon: true, canChangeBackground: true) 
-    	{
-		state "inactive", label: 'Zone 26', icon: "st.security.alarm.clear", backgroundColor: "#ffffff"
-		state "active", label: 'Zone 26', icon: "st.security.alarm.alarm", backgroundColor: "#53a7c0"
-	}                      
-  	standardTile("zone27", "device.zone27", width: 1, height:1, inactiveLabel: false, canChangeIcon: true, canChangeBackground: true) 
-    	{
-		state "inactive", label: 'Zone 27', icon: "st.security.alarm.clear", backgroundColor: "#ffffff"
-		state "active", label: 'Zone 27', icon: "st.security.alarm.alarm", backgroundColor: "#53a7c0"
-	}  
-  	standardTile("zone28", "device.zone28", width: 1, height:1, inactiveLabel: false, canChangeIcon: true, canChangeBackground: true) 
-    	{
-		state "inactive", label: 'Zone 28', icon: "st.security.alarm.clear", backgroundColor: "#ffffff"
-		state "active", label: 'Zone 28', icon: "st.security.alarm.alarm", backgroundColor: "#53a7c0"
-	}  
-  	standardTile("zone29", "device.zone29", width: 1, height:1, inactiveLabel: false, canChangeIcon: true, canChangeBackground: true) 
-    	{
-		state "inactive", label: 'Zone 29', icon: "st.security.alarm.clear", backgroundColor: "#ffffff"
-		state "active", label: 'Zone 29', icon: "st.security.alarm.alarm", backgroundColor: "#53a7c0"
-	}
-    	standardTile("zone30", "device.zone30", width: 1, height:1, inactiveLabel: false, canChangeIcon: true, canChangeBackground: true) 
-    	{
-		state "inactive", label: 'Zone 30', icon: "st.security.alarm.clear", backgroundColor: "#ffffff"
-		state "active", label: 'Zone 30', icon: "st.security.alarm.alarm", backgroundColor: "#53a7c0"
-	}   
-   	standardTile("zone31", "device.zone31", width: 1, height:1, inactiveLabel: false, canChangeIcon: true, canChangeBackground: true) 
-    	{
-		state "inactive", label: 'Zone 31', icon: "st.security.alarm.clear", backgroundColor: "#ffffff"
-		state "active", label: 'Zone 31', icon: "st.security.alarm.alarm", backgroundColor: "#ffa81e"
-	}
-	standardTile("zone32", "device.zone32", width: 1, height:1, inactiveLabel: false, canChangeIcon: true, canChangeBackground: true) 
-	{
-		state "inactive", label: 'Zone 32', icon: "st.security.alarm.clear", backgroundColor: "#ffffff"
-        	state "active", label: 'Zone 32', icon: "st.security.alarm.alarm", backgroundColor: "#ffa81e"
-   	}
-	standardTile("zone33", "device.33", width: 1, height:1, inactiveLabel: false, canChangeIcon: true, canChangeBackground: true) 
-    	{
-		state "inactive", label: 'Zone 33', icon: "st.security.alarm.clear", backgroundColor: "#ffffff"
-		state "active", label: 'Zone 33', icon: "st.security.alarm.alarm", backgroundColor: "#ffa81e"
-	}
- 	standardTile("zone34", "device.zone34", width: 1, height:1, inactiveLabel: false, canChangeIcon: true, canChangeBackground: true) 
-    	{
-		state "inactive", label: 'Zone 34', icon: "st.security.alarm.clear", backgroundColor: "#ffffff"
-		state "active", label: 'Zone 34', icon: "st.security.alarm.alarm", backgroundColor: "#ffa81e"
-	}
-   	standardTile("zone35", "device.zone35", width: 1, height:1, inactiveLabel: false, canChangeIcon: true, canChangeBackground: true) 
-    	{
-		state "inactive", label: 'Zone 35', icon: "st.security.alarm.clear", backgroundColor: "#ffffff"
-		state "active", label: 'Zone 35', icon: "st.security.alarm.alarm", backgroundColor: "#53a7c0"
-	}
-  	standardTile("zone36", "device.zone36", width: 1, height:1, inactiveLabel: false, canChangeIcon: true, canChangeBackground: true) 
-    	{
-		state "inactive", label: 'Zone 36', icon: "st.security.alarm.clear", backgroundColor: "#ffffff"
-		state "active", label: 'Zone 36', icon: "st.security.alarm.alarm", backgroundColor: "#53a7c0"
-	}                      
-  	standardTile("zone37", "device.zone37", width: 1, height:1, inactiveLabel: false, canChangeIcon: true, canChangeBackground: true) 
-    	{
-		state "inactive", label: 'Zone 37', icon: "st.security.alarm.clear", backgroundColor: "#ffffff"
-		state "active", label: 'Zone 37', icon: "st.security.alarm.alarm", backgroundColor: "#53a7c0"
-	}  
-  	standardTile("zone38", "device.zone38", width: 1, height:1, inactiveLabel: false, canChangeIcon: true, canChangeBackground: true) 
-    	{
-		state "inactive", label: 'Zone 38', icon: "st.security.alarm.clear", backgroundColor: "#ffffff"
-		state "active", label: 'Zone 38', icon: "st.security.alarm.alarm", backgroundColor: "#53a7c0"
-	}  
-  	standardTile("zone39", "device.zone39", width: 1, height:1, inactiveLabel: false, canChangeIcon: true, canChangeBackground: true) 
-    	{
-		state "inactive", label: 'Zone 39', icon: "st.security.alarm.clear", backgroundColor: "#ffffff"
-		state "active", label: 'Zone 39', icon: "st.security.alarm.alarm", backgroundColor: "#53a7c0"
-	}
-
-
-//*****************************************************************************************************************************************
-//To customize your device type to the number of zones in your system, simply trim the argument for the <details> command
-//to equal the number of zones. 
-//For example, for 1 zone systems:
-//  	details(["main", "disarm","chime","stay", "away", "panic", "msg", "zone1", "configAD2Pi"])
-//For example, for 4 zones:
-//  	details(["main", "disarm","chime","stay", "away", "panic", "msg", "zone1","zone2", "zone3","zone4", "configAD2Pi"])
-//The maximum number of zones supported by this device type is 36 zones:
-// 		details(["main", "disarm","chime","stay", "away", "panic", "msg", "zone1","zone2", "zone3","zone4","zone5","zone6","zone10","zone11","zone12","zone13","zone14","zone15","zone16","zone17","zone18","zone19","zone20","zone21","zone22","zone23","zone24","zone25","zone26","zone27","zone28","zone29","zone30","zone31","zone32","zone33","zone34","zone35","zone36","zone37","zone38","zone39", "configAD2Pi"])
-//
-//
-//Note: Zones 7,8,9, 95,96 are typically reserved for Panic, Duress, Tamper, Panic and Panic, respectively.  No tile is provided for them
-//*****************************************************************************************************************************************
-
-	main(["main"])
-	details(["main", "disarm","chime","stay", "away", "panic", "msg", "zone1","zone2", "zone3","zone4","zone5","zone6", "zone10","zone11","zone12","zone13","zone14","zone15","zone16","zone17","zone18","zone19","zone20","zone21","zone22","zone23","zone24","zone25","zone26","zone27","zone28","zone29","zone30","zone31","zone32","zone33","zone34","zone35","zone36","zone37","zone38","zone39", "configAD2Pi"])
-}
-
-// Parse incoming device messages to generate events
-def parse(String description) {
-    def isDebugEnabled = true
-  	
-  	def result = []
-    def rawMsg = zigbee.parse(description)?.text
-    if (isDebugEnabled) log.debug "rawMsg: ${rawMsg}"
-    
-    if (rawMsg.contains("ping") || rawMsg.equals("") || rawMsg == null) {
-    	// Do Nothing
-    } else if (rawMsg.contains("...."))  {
-		result << createEvent(name: "msg", value: "Having Trouble Sending")   
-    } else if (rawMsg.contains("|")) {        
-        //0:powerStatus, 1:chimeStatus, 2:alarmStatus, 3:activeZone, 4:inactiveList, 5:keypadMsg
-        String[] msgSplit = rawMsg.toString().split("[|]", 7);
-
-        def powerStatus = msgSplit[0].trim()
-        def chimeStatus = msgSplit[1].trim()
-        def alarmStatus = msgSplit[2].trim()
-		def activeZone = msgSplit[3].trim()
-        def inactiveList = msgSplit[4].trim()
-        def keypadMsg = msgSplit[5].trim()
-
-        if (powerStatus != "" && powerStatus != null) {
-            if (powerStatus == "AC") {
-                result << createEvent(name: "alertMsg", value: "Alarm on AC Power")
-            } else if (powerStatus == "BN") {
-                result << createEvent(name: "alertMsg", value: "Alarm on Battery Power: Fully Charged")
-            } else if (powerStatus == "BL") {
-                result << createEvent(name: "alertMsg", value: "Alarm on Battery Power: Low Charge")
-            }
-            if (isDebugEnabled) log.debug "powerStatus: ${powerStatus}"
-        }
-		
-        if (chimeStatus != "" && chimeStatus != null) {
-            result << createEvent(name: "chime", value: "${chimeStatus}", displayed: true, isStateChange: true, isPhysical: true)
-            if (isDebugEnabled) log.debug "chimeStatus: ${chimeStatus}"
-        }
-			
-        if (alarmStatus != "" && alarmStatus != null) {
-            if (alarmStatus == "alarm") {
-                result << createEvent(name: "alertMsg", value: "Alarm is sounding!!")
-                if (isDebugEnabled) log.debug "alertMsg: Alarm is sounding!!"
-            }
-            result << createEvent(name: "system", value: "${alarmStatus}", displayed: true, isStateChange: true, isPhysical: true)
-            if (isDebugEnabled) log.debug "alarmStatus: ${alarmStatus}"
-        }
-        
-        if (activeZone.equals("") || activeZone == null) {
-            // Do Nothing
-        } else {
-            result << createEvent(name: "zone${activeZone.trim()}", value: "active", descriptionText: alarmMsg, displayed: true, isStateChange: true, isPhysical: true)
-            if (isDebugEnabled) log.debug "Created active event for zone${activeZone.trim()}"
-        }
-        
-        //process inActiveList
-        if (inactiveList.toString() == "allClear") {
-            log.debug ("inactiveList is allClear")
-            inactiveList = ""
-            for (int z = 1; z < 40; z++) {
-                if (device.currentValue("zone${z}") == "active") {
-                	inactiveList = inactiveList + z + ","
-               	}
-            }
-        }
-        if (inactiveList.equals("") || inactiveList == null) {
-            // Do Nothing
-        } else {
-            def inactiveArray = inactiveList.toString().split(",");     
-            for (int i = 0; i < inactiveArray.size(); i++) {
-                result << createEvent(name: "zone${inactiveArray[i].trim()}", value: "inactive", descriptionText: alarmMsg, displayed: true, isStateChange: true, isPhysical: true)
-                if (isDebugEnabled) log.debug "Created inactive event for zone${inactiveArray[i].trim()}"
-            }
-        }
-        
-        if (keypadMsg != "" && keypadMsg != null) {
-	    	result << createEvent(name: "msg", value: keypadMsg, displayed: false)  //displays keypad message to message tile; change to true if you want to also log in "Recently"
-            if (keypadMsg == "Alarm not ready cannot arm") {
-                if (isDebugEnabled) log.debug "alertMsg: ${keypadMsg}"
-            	result << createEvent(name: "alertMsg", value: keypadMsg)
-            }
-            if (isDebugEnabled) log.debug "keypadMsg: ${keypadMsg}"
-        }
-    } else {
-	result << createEvent(name: "msg", value: rawMsg, displayed: false)
+void loop() {
+  char data;
+  // run smartthing logic
+  smartthing.run();
+  // capture IT-100 messages
+  if(Serial1.available() > 0) {  
+    data = Serial1.read();   
+    // if end of message then evaluate and send to the cloud
+    if (data == '\r' && bufferIdx > 0) { 
+      processAD2();
     }
-    return result
+    // otherwise continue build array from message (ignore \n)
+    else if (data != '\n')  {
+      buffer[bufferIdx] = data; 
+      bufferIdx++;
+      // check for buffer overruns
+      if (bufferIdx >= BUFFER_SIZE) 
+      {
+        smartthing.send("ER:Buffer overrun"); 
+        bufferIdx = 0;
+      }
+    }
+  }
+}  
+
+//Process AD2 messages
+void processAD2() {
+  // create String object
+  buffer[bufferIdx] = '\0'; //adds null at end of buffer
+  bufferIdx = 0; // reset  counter for next message
+  String str(buffer);
+  serialLog (str);
+  //handle AD2Pi messages
+
+ //first, check to see if  message is disarmed system status repeating over and over
+  if (str.equals(previousStr))  {   //&& previousStr.indexOf("DISARMED")>=0
+    // do nothing to avoid excessive logging to SmartThings hub and quickly return to loop
+    return;
+  }
+  
+  //message is different than previous message
+  previousStr=str;
+    
+  //check for AD2Pi messages that do not require action
+  //ToDo !RFX may contain data on devices, such as low battery.  !RFX handler may be worth adding in the future
+  if (str.indexOf("!RFX:") >= 0 || str.indexOf("!EXP:") >= 0 || str.equals("!>null") || str.equals("!REL") || str.equals("!LRR") || str.equals("!AUI")) {
+    // do nothing
+    return;
+  } 
+
+  //Build and forward a message to the device handler in SmartThings. Only send information that represents an new status
+  String sendData; // alarm panel combined status
+  String sendMessage; //alarm panel stats + keypad message
+
+  //AD2Pi messages that should be passed to device handler to display but no action required
+  if (str.indexOf("!CONFIG") >= 0) {
+    String sendMessage = ("|||||" + str.substring(8,18));
+    smartthing.send(sendMessage);
+    delay (3000);
+    previousSendData = "";  //trip process to send subsequent message to smartthings
+    previousAlarmStatus = "";
+    return;
+  } 
+  if (str.indexOf("!Sending") >= 0) {
+    String sendMessage = ("|||||"+ str);
+    smartthing.send(sendMessage);
+    previousSendData = "";  //trip process to send subsequent message to smartthings
+    previousAlarmStatus = "";
+    return;
+  } 
+
+  // AD2Pi messages that can be handled at Arduino without device handler
+  if (str.indexOf("Hit * for faults") >= 0) {
+    String sendCommand = "***";
+    Serial1.println(sendCommand);  //send AD2Pi the command to pass on to Alarm Panel
+    return;
+  }
+  
+  /** 
+   * rawPanelCode Data Description
+   * The following was gathered from http://www.alarmdecoder.com/wiki/index.php/Protocol
+   * 
+   * 1 Indicates if the panel is READY
+   * 2 Indicates if the panel is ARMED AWAY
+   * 3 Indicates if the panel is ARMED HOME
+   * 4 Indicates if the keypad backlight is on
+   * 5 Indicates if the keypad is in programming mode
+   * 6 Number (1-7) indicating how many beeps are associated with the message
+   * 7 Indicates that a zone has been bypassed
+   * 8 Indicates if the panel is on AC power
+   * 9 Indicates if the chime is enabled
+   * 10  Indicates that an alarm has occurred. This is sticky and will be cleared after a second disarm.
+   * 11  Indicates that an alarm is currently sounding. This is cleared after the first disarm.
+   * 12  Indicates that the battery is low
+   * 13  Indicates that entry delay is off (ARMED INSTANT/MAX)
+   * 14  Indicates that there is a fire
+   * 15  Indicates a system issue
+   * 16  Indicates that the panel is only watching the perimeter (ARMED STAY/NIGHT)
+   * 17  System specific error report
+   * 18  Ademco or DSC Mode A or D
+   * 19  Unused
+   * 20  Unused
+   *
+   * Unpack AD2Pi messages, evaluate if they represent changes to alarm panel and forward only those messages that represent status changes
+   * Build message to send to device handler as follows:
+   * powerStatus|chimeStatus|alarmStatus|activeZone|inactiveList|keypadMsg
+   */
+
+  String rawPanelCode = getValue(str, ',', 0);
+  //During exit now messages sometimes an extra [ appears at the beginning of the rawPanelCode, remove it if found
+  rawPanelCode.replace("[[", "[");
+  
+  String zoneString = getValue(str, ',', 1);
+  int zoneNumber = zoneString.toInt();
+  String rawPanelBinary = getValue(str, ',', 2);
+  String keypadMsg = getValue(str, ',', 3);
+  
+  //During exit now messages sometimes the alarm messages run together and there are 2 messages in one line.  The follow code detects that sitation and extracts the message.
+  //Example: [0011000100000000----],017,[f70000071017008008020000000000],"A[0011000100000000----],016,[f70000071016008008020000000000],"ARMED ***STAY***May Exit Now  16"
+  if (keypadMsg.indexOf("[") >= 0 && keypadMsg.indexOf("]") >= 0) {
+    keypadMsg = getValue(str, ',', 6);
+  }
+  keypadMsg.replace("\"", "");
+  keypadMsg.trim();
+  while (keypadMsg.indexOf("  ") >= 0) {
+    keypadMsg.replace("  ", " ");
+  }
+  
+  //boolean zoneBypass = (rawPanelCode.substring(7,8) == "1") ? true : false;
+  //boolean systemError = (rawPanelCode.substring(15,16 == "1") ? true : false;
+
+  //Determine power status at alarm panel
+  String powerStatus;
+  if (rawPanelCode.substring(8,9) == "0") { //AC Power Indicator
+    powerStatus = "BN"; // Battery Normal
+    if (rawPanelCode.substring(12,13) == "1") { //Low Battery Indicator
+      powerStatus = "BL"; // Battery Low
+    }
+  } else {
+    powerStatus = "AC";
+  }
+
+  //Determine chime status
+  String chimeStatus = (rawPanelCode.substring(9,10) == "1") ? "chimeOn" : "chimeOff";
+
+  //Determine alarm status
+  String alarmStatus;
+  if (rawPanelCode.substring(11,12) == "1") {
+    alarmStatus = "alarm";
+  } else if (rawPanelCode.substring(2,3) == "0" && rawPanelCode.substring(3,4) == "0") {
+    alarmStatus = "disarmed";
+  } else if (rawPanelCode.substring(2,3) == "1") {
+      alarmStatus = "armedAway";
+  } else if (rawPanelCode.substring(3,4) == "1") {
+    alarmStatus = "armedStay";
+  }
+  if (keypadMsg.indexOf("Exit Now") >= 0) {  
+    alarmStatus.replace("armed", "arming");
+  } 
+
+  //If alarm was previously alarming, security code needs to be entered again to clear
+  if (rawPanelCode.substring(10,11) == "1") { //slot 10 is 'sticky' and requires disarm to be entered again to clear
+    keypadMsg = "Press Disarm To Clear Previous Alarm";
+  } 
+  
+  //Check for faults
+  //each alarm message contains a listed fault which is either a active fault or an inactive fault representing the previous fault 
+  //active faults are are noted by a "0" as the first number in the rawPanelCode if the alarm is in a disarmed state or are implicit to an alarm state
+  String activeZone;   //zone that is being reported active by the alarm panel
+  String inactiveList; //zones that are no longer active
+  
+  //the alarm panel message reports either an active zone, if any, or will report the last zone taht was active
+  //this codd ensures 1) non-active faults are not passed on to the device handler, 2) resets active zone array and triggers a reset of any fault states in the device handler
+  if (rawPanelCode.substring(1,2) == "1" || rawPanelCode.substring(2,3) == "1" || rawPanelCode.substring(3,4) == "1" ) {  //Indicates Panel Not Faulted 
+    //ToDo: is this true with device faults, such as wireless sensors with low battery, etc.. ?
+    //ToDo: is this true when zone bypass has been enabled?
+    //ToDo: may need to replace using the "1" at bit postions 2,3 or 4 with the keypadMsg of "disarmed", "armed", "arming" if the above creates issues
+    inactiveList = "allClear:" + String(numZones);  //when processed by device handler, will reset all zones
+    getActiveList(1, numZones+1);
+   
+   //detect new faults 
+  } else if (zoneStatusList[zoneNumber] == 0) {
+    //New Fault, mark active and send to SmartThings
+    lastZone = zoneNumber;
+    zoneStatusList[zoneNumber] = 1;
+    zoneStatusList[0] = zoneStatusList[0] + 1;
+    //Send only 1 new fault since others were previously sent
+    activeZone = String(zoneNumber);
+    serialLog("New fault detected: " + activeZone);
+    previousStr=""; //need to run through logic a second time to clear the zoneList
+			
+    //evaluate cases where 1 fault is repeating
+  } else if (zoneNumber == lastZone && zoneStatusList[0] == 1) {
+    //Do nothing: Only 1 fault repeating
+    serialLog("Single fault repeating: zoneNumber(" + String(zoneNumber) + ") == lastZone(" + String(lastZone) + ")");
+ 
+    //evaluate three cases where two or more zones are active  
+  } else if (zoneNumber == lastZone && zoneStatusList[0] > 1) {
+    //Faults(s) dropped from list.  Gather a list of those zones and mark inactive.
+    inactiveList = getActiveList(1, numZones + 1);
+    //Since we don't know what zone, remove current zone and set back to active in zoneStatusList array and update counter
+    //the dropped zones would be all zones from lastZone to zoneNumber.  Insert sub-routine to zero those zones out.
+    //Issue: sometimes a motion detector can trick this subroutine by rapidly going on and off and trigger multiple messages out of rotation
+    inactiveList.replace(String(zoneNumber) + ",", "");
+    zoneStatusList[zoneNumber] = 1;
+    zoneStatusList[0] = zoneStatusList[0] + 1;
+    serialLog ("zoneNumber(" + String(zoneNumber) + ") == lastZone(" + String(lastZone) + "): Faults Dropped from list and marked inactive: " + String(inactiveList));
+    previousStr=""; //logic requires two run throughs to complete proper update of zoneStatusList
+		
+  } else if (zoneNumber < lastZone) {
+    //Fault list starting over, determine if any faults dropped from list between zone 1 and current zone and also between the lastZone and numZones
+    inactiveList = getActiveList(1, zoneNumber);
+    //if fault list is starting over at zone1, need to check from lastZone+1 and zoneNumber
+    if (zoneNumber == 1) {
+      inactiveList = inactiveList + getActiveList(lastZone+1, numZones+1);
+    }
+    serialLog ("zoneNumber(" + String(zoneNumber) + ") < lastZone(" + String(lastZone) + "): Faults Dropped from list and marked inactive: " + String(inactiveList));
+
+    lastZone = zoneNumber;
+    previousStr=""; //logic requires two run throughs to complete proper update of zoneStatusList
+
+  } else if (zoneNumber > lastZone) {
+    //Fault list progressing, determine if any faults dropped from list between previous and current zone
+    inactiveList = getActiveList(lastZone + 1, zoneNumber);
+    serialLog("zoneNumber(" + String(zoneNumber) + ") > lastZone(" + String(lastZone) + "): Faults Dropped from list and marked inactive: " + String(inactiveList));        
+    previousStr=""; //logic requires two run throughs to complete proper update of zoneStatusList
+    lastZone = zoneNumber;
+  }
+
+  //build the message to send to the device handler on the hub
+  if (powerStatus == previousPowerStatus) {
+    sendMessage = "|";
+  } else {
+    sendMessage = powerStatus + "|";
+    previousPowerStatus = powerStatus;
+  }
+  if (chimeStatus == previousChimeStatus) {
+    sendMessage = sendMessage + "|";
+  } else {
+    sendMessage = sendMessage + chimeStatus + "|";
+    previousChimeStatus = chimeStatus;
+  }
+  if (alarmStatus == previousAlarmStatus) {
+    sendMessage = sendMessage + "|";
+  } else {
+    sendMessage = sendMessage + alarmStatus + "|";
+    previousAlarmStatus = alarmStatus;
+  }
+  if (activeZone == previousActiveZone) {
+    sendMessage = sendMessage + "|";
+  } else {
+    sendMessage = sendMessage + String(activeZone) + "|";
+    previousActiveZone = activeZone;
+  }
+  if (inactiveList == previousInactiveList) {
+    sendMessage = sendMessage + "|";
+  } else {
+    sendMessage = sendMessage + String(inactiveList) + "|";
+    previousInactiveList = inactiveList;
+  }
+  sendData = sendMessage;
+  sendMessage = sendMessage + keypadMsg;
+ 
+  // Messages longer than 63 characters sometimes do not send to SmartThings.  Check length and truncate message if longer than 63 characters.
+  if (sendMessage.length() > 63) {
+    sendMessage.remove(63);  
+  }      
+  if (sendMessage.indexOf("|||||") >= 0 || sendData == previousSendData) {  
+    //prevents sending multiple rotating faults with different keypad messages from flooding smartthings hub.  
+    //Last new keypad message remains displayed in message tile on smartphone.  ToDo: should we design custom message???
+  } else {
+    //now send an alarm panel update to SmartThings
+    serialLog("Sent to SmartThings:" + sendMessage);
+    smartthing.send(sendMessage);   
+  }
+    previousSendData = sendData;
 }
 
-// Commands sent to the device
-def on() //use to turn on alarm while home
-{  
-	armStay()
-}
-def off() 
-{
-	disarm()
-}
-
-def lock()//use to turn on alarm in away mode
-{
-	armAway()
-}
-
-def unlock()
-{
-	disarm()
-}
-
-def armAway()
-{
-	zigbee.smartShield(text: "[CODE]"+ securityCode + "2").format()    
-}
-def disarm() 
-{
-    sendEvent(name: "system", value: "disarmed", displayed: true, isStateChange: true, isPhysical: true)
-    sendEvent(name: "panic", value: "disarmed", displayed: false, isStateChange: true, isPhysical: true)
-    zigbee.smartShield(text: "[CODE]"+ securityCode + "1***").format()
-}
-
-def armStay() 
-{
-	zigbee.smartShield(text: "[CODE]" + securityCode + "3").format()
-}
-
-
-def siren()
-{
-    log.debug "sent panic"
-    zigbee.smartShield(text: "[FUNC]"+ panicKey).format()
-}
-
-def chime() 
-{
-
-	zigbee.smartShield(text: "[CODE]" + securityCode + "9").format()
-}
-
-def config()
-	// pressing the "Config" tile on the AD2Pi will normally request the alarm panel to report out its Configurtion into the message tile.
-    // If a Configuration Command was provided as input into the Preferences, this method will send the command down to the Arduino
-    // which will write to the eeprom of the AD2Pi 
-{
-    log.debug "sending AD2Pi Config Command: ${configCommand}"
-    zigbee.smartShield(text: "[CONF]${configCommand}").format()
+void messageCallout(String message) { 
+  if(message.length() > 0) { //avoids processing ping from hub
+    // Parse message from SmartThings
+    String msgType = getValue(message, '|', 0);
+    String msgSecurityCode = getValue(message, '|', 1);
+    // Check to see if security code was set in the device handler and if not set it to the security code from this sketch
+    msgSecurityCode = (msgSecurityCode != "") ? msgSecurityCode : securityCode;
+    String msgCmd = getValue(message, '|', 2);
+  		
+    if (msgType.equals("CODE")) {
+      //Check to make sure a security code is set and if not update the device handler keypad message
+      if (msgSecurityCode == "") {
+        serialLog( "Security code not set.  Updated SmartThings.");
+        smartthing.send(String("||disarmed|||Alarm security not set!"));\
+        return;
+      }
+    
+      //Check to see if arming away and if alarm is ready, if not send notification that alarm cannot be armed.
+      //This won't work for arming stay since motions could be active that don't affect arm stay.
+      if (msgCmd == "2" && zoneStatusList[0] > 0) {
+        serialLog( "Alarm not ready, cannot arm.  Updated SmartThings.");
+        smartthing.send(String("||disarmed|||Alarm not ready; cannot arm"));\
+      } else {
+        String sendCommand = msgSecurityCode + msgCmd;
+        Serial1.println(sendCommand);  //send AD2Pi the command to pass on to Alarm Panel
+        //serialLog("Sent AD2Pi: " + sendCommand);
+      }
+    } else if (msgType.equals("CONF")) {
+      Serial1.println("C" + msgCmd);  //send configuration command to AD2Pi
+      serialLog("Sent AD2Pi: C" + msgCmd);
+    } else if (msgType.equals("FUNC")) {
+      //serialLog("Sending AD2Pi ASCII:" + msgCmd);
+      if (msgCmd.equals("A")) {
+        Serial1.write(1);
+        Serial1.write(1);
+        Serial1.write(1);
+      } else if (msgCmd.equals("B")) {
+        Serial1.write(2);
+        Serial1.write(2);
+        Serial1.write(2);
+      } else if (msgCmd.equals("C")) {
+        Serial1.write(3);
+        Serial1.write(3);
+        Serial1.write(3);
+      }
+    }
+  }
 }
 
-def pressPanicOnce() 
-{
-  sendEvent(name: "panic", value: "pressedOnce", displayed: true, isStateChange: true, isPhysical: true)
-  log.debug "pressed panic key once"
+String getValue(String data, char separator, int index) {
+  int found = 0;
+  int strIndex[] = {0, -1};
+  int maxIndex = data.length()-1;
+
+  for(int i=0; i<=maxIndex && found<=index; i++){
+    if(data.charAt(i) == separator || i == maxIndex){
+        found++;
+        strIndex[0] = strIndex[1]+1;
+        strIndex[1] = (i == maxIndex) ? i+1 : i;
+    }
+  }
+  return found > index ? data.substring(strIndex[0], strIndex[1]) : "";
+}
+
+String getActiveList(int start, int end) {
+  String faultList; 
+  for (int i = start; i < end; ++i) {
+    if (zoneStatusList[i] == 1) { 
+      faultList = faultList + String(i) + ",";
+      zoneStatusList[i] = 0;  //when using getActiveList to return the deactive list, you want to zero out the deactive zones.
+    }
+  }
+ 
+  //Update Count in element 0  
+  int faultCount = 0;
+  for (int i = 1; i < numZones + 1; ++i) {
+    if (zoneStatusList[i] == 1) { 
+      faultCount = faultCount + 1;
+    }
+  }
+  zoneStatusList[0] = faultCount;
+  if (isDebugEnabled) {
+    printArray(zoneStatusList, numZones + 1);
+  }
+  return faultList;
 }
 
 
-def pressPanicTwice() 
-{
-  sendEvent(name: "panic", value: "pressedTwice", displayed: true, isStateChange: true, isPhysical: true)
-  log.debug "pressed panic key twice"
+void printArray(int *a, int n) {
+  for (int i = 0; i < n; i++) {
+    if (i == 0) {
+      Serial.print("Count:");
+    } else {
+      Serial.print(String(i) + ":");
+    }
+    Serial.print(a[i], DEC);
+    Serial.print(' ');
+  }
+  Serial.println();
 }
 
+void serialLog(String serialMsg) {
+  if (isDebugEnabled) {
+    Serial.println(serialMsg);
+  }
+}
