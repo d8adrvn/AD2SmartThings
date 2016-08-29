@@ -1,5 +1,5 @@
 /**
- *  Alarm Handler v2.2
+ *  Alarm Handler v2.3
  *
  *  Copyright 2015 Michael Ritchie
  *
@@ -15,7 +15,7 @@
  */
  
 definition(
-    name: "Alarm Handler v2.2",
+    name: "Alarm Handler v2.3",
     namespace: "",
     author: "Michael Ritchie",
     description: "Create virtual devices for each alarm zone, Sends alerts from the alarm panel, synchronizes alarm panel with Smart Home Monitor",
@@ -48,7 +48,7 @@ def zoneSetup() {
         	section("Virtual Device " + i) {
                 input "zone" + i, "number", title: "Zone Number", required: true
                 input "name" + i, "string", title: "Zone Name", required: true
-                input "typezone" + i, "enum", title: "Zone Type", options:["Simulated Contact Sensor","Simulated Motion Sensor"], required: true
+                input "typezone" + i, "enum", title: "Zone Type", options:["Simulated Contact Sensor","Simulated Motion Sensor","Simulated Smoke Alarm"], required: true
             }
         }    
     }
@@ -127,15 +127,18 @@ def initialize() {
 
         if (zoneType == "Simulated Contact Sensor") {
         	//log.debug("Subscribing to ${arduino}, ${zoneNumber}, contactHandler")
-            subscribe(arduino, zoneNumber, contactHandler)
+            subscribe(arduino, zoneNumber, virtualDeviceHandler)
         } else if (zoneType == "Simulated Motion Sensor") {
         	//log.debug("Subscribing to ${arduino}, ${zoneNumber}, motionHandler")
-            subscribe(arduino, zoneNumber, motionHandler)
+            subscribe(arduino, zoneNumber, virtualDeviceHandler)
+        } else if (zoneType == "Simulated Smoke Alarm") {
+        	//log.debug("Subscribing to ${arduino}, ${zoneNumber}, motionHandler")
+            subscribe(arduino, zoneNumber, virtualDeviceHandler)
         }
     }
 }
 
-def motionHandler(evt) {
+def virtualDeviceHandler(evt) {
     def deviceName = evt.name
     def deviceValue = evt.value
     def deviceID = "Alarm_" + deviceName
@@ -143,23 +146,20 @@ def motionHandler(evt) {
     
     def virtualDevice = getChildDevice(deviceID)
     if (virtualDevice) {
-        virtualDevice.sendEvent(name: "motion", value: deviceValue)
+        def virtualDeviceType = virtualDevice.typeName
+        switch (virtualDeviceType) {
+            case "Simulated Contact Sensor":
+                virtualDevice.sendEvent(name: "contact", value: deviceValue == "active" ? "open" : "closed")
+                break
+            case "Simulated Motion Sensor":
+                virtualDevice.sendEvent(name: "motion", value: deviceValue)
+                break
+            case "Simulated Smoke Alarm":
+                virtualDevice.sendEvent(name: "smoke", value: deviceValue == "active" ? "smoke" : "clear")
+                break
+        }
     } else {
         log.debug "Could not find child device '${deviceID}'"
-    }
-}
-
-def contactHandler(evt) {
-    def deviceName = evt.name
-    def deviceValue = evt.value
-    def deviceID = "Alarm_" + deviceName
-    //log.debug "deviceName: ${deviceName}, deviceValue: ${deviceValue}, deviceID: ${deviceID}"
-    
-    def virtualDevice = getChildDevice(deviceID)
-    if (virtualDevice) {
-    	virtualDevice.sendEvent(name: "contact", value: deviceValue == "active" ? "open" : "closed")
-    } else {
-        log.debug "Could not find child device ${deviceID}"
     }
 }
 
