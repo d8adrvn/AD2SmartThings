@@ -1,5 +1,5 @@
 /** 
- * AD2SmartThings v4_4_7
+ * AD2SmartThings v4_4_8
  * Couple your Ademco/Honeywell Alarm to your SmartThings Graph using an AD2PI, an Arduino and a ThingShield
  * The Arduino passes all your alarm messages to your SmartThings Graph where they can be processed by the Device Type
  * Use the Device Type to control your alarm or use SmartApps to integrate with other events in your home graph
@@ -133,7 +133,7 @@ void processAD2() {
   serialLog (str);
   //handle AD2Pi messages
 
- //first, check to see if new message is the same as previous, in which case do nothing
+  //first, check to see if new message is the same as previous, in which case do nothing
   if (str.equals(previousStr))  {   
     // do nothing to avoid excessive logging to SmartThings hub and quickly return to loop
     return;
@@ -142,15 +142,33 @@ void processAD2() {
   //message is different than previous message
   previousStr=str;
     
-  //check for AD2Pi messages that do not require action
+  //Check for AD2Pi messages that do not require action
   //ToDo !RFX may contain data on devices, such as low battery.  !RFX handler may be worth adding in the future
-  if (str.indexOf("!RFX:") >= 0 || str.indexOf("!EXP:") >= 0 || str.equals("!>null") || str.equals("!REL") || str.equals("!LRR") || str.equals("!AUI")) {
+  if (str.indexOf("!RFX:") >= 0 || str.equals("!>null") || str.equals("!REL") || str.equals("!LRR") || str.equals("!AUI")) {
     // do nothing
     return;
   } 
 
+  /* Zone expanders report zones faulting and restoring unlike zones on the main alarm panel board.  Each zone expander is addressed differently
+   * starting with 07 and next expander is 08 and so on:
+   
+     Address  Zones
+       07     9-16
+       08     17-24
+       09     25-32
+       10     33-40
+       11     41-48
+   
+   * When a zone on a zone expander faults, the message will include the zone expander address, zone number 01-08, and 01 for fault and 00 for restore.
+   * Example !EXP:07,07,01 means the 7th zone on the 07 address expander is currently faulting or alarm panel zone 15 faulted.
+   * These !EXP messages will always come through along with a keypad message update if the alarm is disarmed.  These messages are only useful when the
+   * alarm is armed stay but since these messages don't include the Bit field with overall alarm status we can only determine if the alarm is armed stay
+   * by a previous message value.  If alarm panel is not armed stay skip these messages.                                                                */
 
-  
+  if (previousAlarmStatus.indexOf("Stay") == -1 && str.indexOf("!EXP:") >= 0) {
+    // do nothing
+    return;
+  }
   
   //Build and forward a message to the device handler in SmartThings. Only send information that represents an new status
   String sendData; // alarm panel combined status
@@ -181,8 +199,6 @@ void processAD2() {
   if (str.startsWith("!Sending")) {
     return;
   } 
-  
-
 
   /* By default the alarm panel doesn't display individual faults but they can be displayed by hitting the * key.  If the panel is disarmed via SmartThings, the * key
    * is automatically included during disarm.  But if the panel is disarmed via keypad, the panel may prompt for the * key.  The code below will look for the prompt
@@ -194,7 +210,7 @@ void processAD2() {
     return;
   }
   
-  /** 
+  /*
    * rawPanelCode Data Description
    * The following was gathered from http://www.alarmdecoder.com/wiki/index.php/Protocol
    * 
@@ -224,6 +240,12 @@ void processAD2() {
    * powerStatus|chimeStatus|alarmStatus|activeZone|inactiveList|keypadMsg
    */
 
+  // Declare variables
+  String keypadMsg;
+  String powerStatus;
+  String chimeStatus;
+  String alarmStatus;
+
   String rawPanelCode = getValue(str, ',', 0);
   //During exit now messages sometimes an extra [ appears at the beginning of the rawPanelCode, remove it if found
   rawPanelCode.replace("[[", "[");
@@ -231,55 +253,57 @@ void processAD2() {
   String zoneString = getValue(str, ',', 1);
   int zoneNumber = zoneString.toInt();
   String rawPanelBinary = getValue(str, ',', 2);
-  String keypadMsg = getValue(str, ',', 3);
-  
-  //During exit now messages sometimes the alarm messages run together and there are 2 messages in one line.  The follow code detects that sitation and extracts the message.
-  //Example: [0011000100000000----],017,[f70000071017008008020000000000],"A[0011000100000000----],016,[f70000071016008008020000000000],"ARMED ***STAY***May Exit Now  16"
-  if (keypadMsg.indexOf("[") >= 0 && keypadMsg.indexOf("]") >= 0) {
-    keypadMsg = getValue(str, ',', 6);
-  }
-  keypadMsg.replace("\"", "");
-  keypadMsg.trim();
-  while (keypadMsg.indexOf("  ") >= 0) {
-    keypadMsg.replace("  ", " ");
-  }
-  
-  //boolean zoneBypass = (rawPanelCode.substring(7,8) == "1") ? true : false;
-  //boolean systemError = (rawPanelCode.substring(15,16 == "1") ? true : false;
 
-  //Determine power status at alarm panel
-  String powerStatus;
-  if (rawPanelCode.substring(8,9) == "0") { //AC Power Indicator
-    powerStatus = "BN"; // Battery Normal
-    if (rawPanelCode.substring(12,13) == "1") { //Low Battery Indicator
-      powerStatus = "BL"; // Battery Low
+  // Zone expander messages do not include the bit field that includes overall alarm status, skip the processing of that data if message is from zone expander
+  if (str.indexOf("!EXP:") == -1) {
+    keypadMsg = getValue(str, ',', 3);
+    
+    //During exit now messages sometimes the alarm messages run together and there are 2 messages in one line.  The follow code detects that sitation and extracts the message.
+    //Example: [0011000100000000----],017,[f70000071017008008020000000000],"A[0011000100000000----],016,[f70000071016008008020000000000],"ARMED ***STAY***May Exit Now  16"
+    if (keypadMsg.indexOf("[") >= 0 && keypadMsg.indexOf("]") >= 0) {
+      keypadMsg = getValue(str, ',', 6);
     }
-  } else {
-    powerStatus = "AC";
+    keypadMsg.replace("\"", "");
+    keypadMsg.trim();
+    while (keypadMsg.indexOf("  ") >= 0) {
+      keypadMsg.replace("  ", " ");
+    }
+    
+    //boolean zoneBypass = (rawPanelCode.substring(7,8) == "1") ? true : false;
+    //boolean systemError = (rawPanelCode.substring(15,16 == "1") ? true : false;
+  
+    //Determine power status at alarm panel
+    if (rawPanelCode.substring(8,9) == "0") { //AC Power Indicator
+      powerStatus = "BN"; // Battery Normal
+      if (rawPanelCode.substring(12,13) == "1") { //Low Battery Indicator
+        powerStatus = "BL"; // Battery Low
+      }
+    } else {
+      powerStatus = "AC";
+    }
+  
+    //Determine chime status
+    chimeStatus = (rawPanelCode.substring(9,10) == "1") ? "chimeOn" : "chimeOff";
+  
+    //Determine alarm status
+    if (rawPanelCode.substring(11,12) == "1") {
+      alarmStatus = "alarm";
+    } else if (rawPanelCode.substring(2,3) == "0" && rawPanelCode.substring(3,4) == "0") {
+      alarmStatus = "disarmed";
+    } else if (rawPanelCode.substring(2,3) == "1") {
+        alarmStatus = "armedAway";
+    } else if (rawPanelCode.substring(3,4) == "1") {
+      alarmStatus = "armedStay";
+    }
+    if (keypadMsg.indexOf("Exit Now") >= 0 || keypadMsg.indexOf("exit now") >= 0) {  
+      alarmStatus.replace("armed", "arming");
+    } 
+  
+    //If alarm was previously alarming, security code needs to be entered again to clear
+    if (rawPanelCode.substring(10,11) == "1") { //slot 10 is 'sticky' and requires disarm to be entered again to clear
+      keypadMsg = "Press Disarm To Clear Previous Alarm";
+    }
   }
-
-  //Determine chime status
-  String chimeStatus = (rawPanelCode.substring(9,10) == "1") ? "chimeOn" : "chimeOff";
-
-  //Determine alarm status
-  String alarmStatus;
-  if (rawPanelCode.substring(11,12) == "1") {
-    alarmStatus = "alarm";
-  } else if (rawPanelCode.substring(2,3) == "0" && rawPanelCode.substring(3,4) == "0") {
-    alarmStatus = "disarmed";
-  } else if (rawPanelCode.substring(2,3) == "1") {
-      alarmStatus = "armedAway";
-  } else if (rawPanelCode.substring(3,4) == "1") {
-    alarmStatus = "armedStay";
-  }
-  if (keypadMsg.indexOf("Exit Now") >= 0 || keypadMsg.indexOf("exit now") >= 0) {  
-    alarmStatus.replace("armed", "arming");
-  } 
-
-  //If alarm was previously alarming, security code needs to be entered again to clear
-  if (rawPanelCode.substring(10,11) == "1") { //slot 10 is 'sticky' and requires disarm to be entered again to clear
-    keypadMsg = "Press Disarm To Clear Previous Alarm";
-  } 
   
   //Check for faults
   //each alarm message contains a listed fault which is either a active fault or an inactive fault representing the previous fault 
@@ -287,15 +311,72 @@ void processAD2() {
   String activeZone;   //zone that is being reported active by the alarm panel
   String inactiveList; //zones that are no longer active
   
-  //the alarm panel message reports either an active zone, if any, or will report the last zone taht was active
-  //this codd ensures 1) non-active faults are not passed on to the device handler, 2) resets active zone array and triggers a reset of any fault states in the device handler
-  if (rawPanelCode.substring(1,2) == "1" || rawPanelCode.substring(2,3) == "1" || rawPanelCode.substring(3,4) == "1" ) {  //Indicates Panel Not Faulted 
+  /* Zone expanders report zones faulting and restoring unlike zones on the main alarm panel board.  These messages are only useful when the
+   * alarm is armed stay so if alarm panel is not armed stay don't process these messages.                                                  */
+  
+  if (previousAlarmStatus.indexOf("Stay") >= 0 && str.indexOf("!EXP:") >= 0) {
+    // Since zone expander messages don't include the overall alarm status, default power, chime, and alarm status values to previous values so they are not reset to SmartThings
+    powerStatus = previousPowerStatus;
+    chimeStatus = previousChimeStatus;
+    alarmStatus = previousAlarmStatus;
+    
+    // Get zone expander address value so the zone number can be calculated
+    String expanderAddress = getValue(rawPanelCode, ':', 1);
+    int expanderInt = expanderAddress.toInt();
+    
+    // Calculate the alarm zone number
+    switch (expanderInt) {
+      case 7:
+        zoneNumber = zoneNumber + 8;
+        break;
+      case 8:
+        zoneNumber = zoneNumber + 16;
+        break;
+      case 9:
+        zoneNumber = zoneNumber + 24;
+        break;
+      case 10:
+        zoneNumber = zoneNumber + 32;
+        break;
+      case 11:
+        zoneNumber = zoneNumber + 40;
+        break;
+      default:
+        // Something is not right so ignore the message
+        return;
+    }
+    
+    // 01 means active and 00 means restored
+    if (rawPanelBinary == "01") {
+      activeZone = String(zoneNumber);
+      serialLog("New fault detected on zone expander: " + activeZone);
+    } else {
+      inactiveList = String(zoneNumber);
+      serialLog("Fault restored on zone expander: " + inactiveList);
+    }
+
+  /* The alarm panel message reports either an active zone, if any, or will report the last zone that was active.  This code ensures:
+   * 1) non-active faults are not passed on to the device handler, 2) resets active zone array and triggers a reset of any fault states in the device handler.
+   *
+   * Since zone expander's report faults and restores and these are only useful when the alarm is armed stay, only reset active zone if alarm reports:
+   * Disarm Ready or Armed Away */
+   
+  } else if (rawPanelCode.substring(1,2) == "1" || rawPanelCode.substring(2,3) == "1") {
     //ToDo: is this true with device faults, such as wireless sensors with low battery, etc.. ?
     //ToDo: is this true when zone bypass has been enabled?
-    //ToDo: may need to replace using the "1" at bit postions 2,3 or 4 with the keypadMsg of "disarmed", "armed", "arming" if the above creates issues
     inactiveList = "allClear:" + String(numZones);  //when processed by device handler, will reset all zones
     getActiveList(1, numZones+1);
-   
+  
+  /* After a zone expander !EXP message, a normal alarm panel message immediately follows these messages.  Since zone expanders report when a zone has restored
+   * we need to prevent the normal message from being processed so that the allClear message is not sent to SmartThings.  !EXP messages are only useful when alarm
+   * is armed stay so check if alarm is armed stay.  However if the alarm was just armed stay send the allClear reset to SmartThings.                            */
+  
+  } else if (rawPanelCode.substring(3,4) == "1" ) {
+    if (alarmStatus != previousAlarmStatus) {
+      inactiveList = "allClear:" + String(numZones);  //when processed by device handler, will reset all zones
+      getActiveList(1, numZones+1);
+    }
+
    //detect new faults 
   } else if (zoneStatusList[zoneNumber] == 0) {
     //New Fault, mark active and send to SmartThings
